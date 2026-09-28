@@ -9,11 +9,13 @@ service_09252_008/
 ├── domain/            # 领域模型层
 │   ├── models.py      #   课程包、导师、工坊资源、材料批次、接待窗口、预约、发运单、损耗、结算、事件
 │   ├── rules.py       #   纯规则：前置培训、容量、安全等级、互斥资源、材料分配、运输周期
+│   ├── forecasting.py #   容量需求预测纯逻辑：采样分桶、历史充足度评估、确定性模型、输入版本指纹
 │   └── errors.py      #   领域错误（接口边界据此映射 HTTP 状态码）
 ├── application/       # 应用服务层
 │   ├── ports.py       #   可替换端口：Clock / IdGenerator（测试注入手动时钟与序列 ID）
 │   ├── catalog_service.py  # 目录登记与校验
-│   └── booking_service.py  # 预约状态机：申请/报价/锁定/改期/发运/到货/签到/结算/取消/恢复
+│   ├── booking_service.py  # 预约状态机：申请/报价/锁定/改期/发运/到货/签到/结算/取消/恢复
+│   └── capacity_forecast_service.py  # 容量需求预测：口径登记、解算、按输入版本重算
 ├── persistence/       # 持久化层
 │   ├── store.py       #   存储端口 + 内存实现（快照回滚）
 │   └── sqlite_store.py     # SQLite 实现（BEGIN IMMEDIATE，重启可恢复）
@@ -37,6 +39,23 @@ service_09252_008/
 - **超时恢复**：过期锁定释放库存并晋级候补，过期报价退回待报价；
   服务启动时与 `POST /admin/recover` 均可触发。
 - **时间**：内部一律 UTC；输入接受任意 ISO-8601 偏移（拒绝朴素时间）。
+
+## 容量需求预测
+
+资源规划口径：预测输入（采样窗口 + 模型参数）先登记落库，解算与重算都指向
+明确的**输入版本**（范围 + 物化窗口 + 参数 + 观测点的规范化哈希）。
+
+- **采样窗口**：半开区间按 `bucket_seconds` 切桶，聚合已确认预约
+  （`LOCKED / SHIPPED / CHECKED_IN / SETTLED`）的席位需求；零需求桶同样是观测值。
+  可选 `scope`（resource_id / window_id / institution）过滤口径。
+- **模型参数**：`model_type`（`moving_average` / `linear_trend`）、
+  `min_data_points`、`recommended_data_points`、`forecast_horizon_buckets`，
+  另带模型代码版本 `capacity-forecast-v1`。
+- **警告级别**：`info`（样本低于推荐覆盖，报告照出）→ `warning`（低于模型最小
+  样本量，抑制报告）→ `error`（窗口内无任何历史，抑制报告）。警告携带
+  code 与桶级证据，缺历史数据时**绝不写空报告**（只留运行记录供审计）。
+- **重新计算**：必须显式携带 `input_version`；指纹与当前数据一致才重算
+  （模型确定性，结果可复现），不一致返回 422 并给出请求版本与当前版本。
 
 ## 运行
 
@@ -62,6 +81,10 @@ python3 -m service_09252_008 --host 127.0.0.1 --port 8080
 | POST | `/bookings/{id}/settle` | 结算（`actual_attendance`、可选 `damaged`） |
 | POST | `/bookings/{id}/cancel` | 取消（释放候补、按规则记损耗） |
 | POST | `/admin/recover` | 恢复超时任务 |
+| POST | `/capacity-forecasts` | 登记预测口径（采样窗口 + 模型参数） |
+| GET  | `/capacity-forecasts/{id}` `/capacity-forecasts/{id}/runs` | 查询配置与运行记录 |
+| POST | `/capacity-forecasts/{id}/run` | 解算一次预测（数据不足时返回警告、不写报告） |
+| POST | `/capacity-forecasts/{id}/recompute` | 按显式 `input_version` 重算 |
 | GET  | `/bookings/{id}` `/health` | 查询 |
 
 幂等键经请求头 `Idempotency-Key` 或载荷字段 `idempotency_key` 传入；
@@ -75,7 +98,9 @@ python3 -m unittest discover -s tests -v
 
 覆盖：主流程端到端、前置培训/容量/安全/互斥/运输周期规则、跨时区、
 幂等重放、并发锁定（内存与 SQLite 双后端）、重启后超时恢复、
-部分到货与在途损耗、取消释放候补与损耗记录、HTTP 接口边界。
+部分到货与在途损耗、取消释放候补与损耗记录、
+容量需求预测（口径持久化、显式输入版本重算、缺历史数据不写空报告、SQLite 重启恢复）、
+HTTP 接口边界。
 
 ## 编译检查
 

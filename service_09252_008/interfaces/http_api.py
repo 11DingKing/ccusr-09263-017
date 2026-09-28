@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from ..application.booking_service import BookingService
+from ..application.capacity_forecast_service import CapacityForecastService
 from ..application.catalog_service import (
     COLLECTION_BATCHES,
     COLLECTION_MENTORS,
@@ -61,7 +62,11 @@ class _Router:
         return None
 
 
-def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
+def build_router(
+    catalog: CatalogService,
+    bookings: BookingService,
+    forecast: CapacityForecastService,
+) -> _Router:
     router = _Router()
 
     def with_idempotency_key(payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -138,6 +143,29 @@ def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
         lambda body, hdr: bookings.cancel(hdr["__path__"]["booking_id"], with_idempotency_key(body, hdr)),
     )
     router.add("POST", "/admin/recover", lambda body, hdr: bookings.recover())
+
+    # 容量需求预测：登记采样窗口与模型参数、解算、按显式输入版本重算
+    router.add("POST", "/capacity-forecasts", lambda body, hdr: forecast.create_forecast(body))
+    router.add(
+        "GET",
+        "/capacity-forecasts/{forecast_id}",
+        lambda body, hdr: forecast.get_forecast(hdr["__path__"]["forecast_id"]),
+    )
+    router.add(
+        "POST",
+        "/capacity-forecasts/{forecast_id}/run",
+        lambda body, hdr: forecast.run_forecast(hdr["__path__"]["forecast_id"]),
+    )
+    router.add(
+        "POST",
+        "/capacity-forecasts/{forecast_id}/recompute",
+        lambda body, hdr: forecast.recompute(hdr["__path__"]["forecast_id"], body),
+    )
+    router.add(
+        "GET",
+        "/capacity-forecasts/{forecast_id}/runs",
+        lambda body, hdr: forecast.list_runs(hdr["__path__"]["forecast_id"]),
+    )
     router.add("GET", "/health", lambda body, hdr: {"status": "ok"})
     return router
 
@@ -177,7 +205,7 @@ def make_handler_class(router: _Router) -> type[BaseHTTPRequestHandler]:
                 headers = {k.lower(): v for k, v in self.headers.items()}
                 headers["__path__"] = path_params  # type: ignore[assignment]
                 result = handler(body, headers)
-                status = 201 if method == "POST" and path == "/bookings" else 200
+                status = 201 if method == "POST" and path in {"/bookings", "/capacity-forecasts"} else 200
                 self._send_json(status, result)
             except DomainError as exc:
                 self._send_json(_ERROR_STATUS.get(exc.code, 400), exc.to_dict())
@@ -200,9 +228,10 @@ def create_server(
     port: int,
     catalog: CatalogService,
     bookings: BookingService,
+    forecast: CapacityForecastService,
 ) -> ThreadingHTTPServer:
     """构建线程化 HTTP 服务（守护线程，随进程退出）。"""
-    router = build_router(catalog, bookings)
+    router = build_router(catalog, bookings, forecast)
     server = ThreadingHTTPServer((host, port), make_handler_class(router))
     server.daemon_threads = True
     return server

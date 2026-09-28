@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from .application.booking_service import BookingService
+from .application.capacity_forecast_service import CapacityForecastService
 from .application.catalog_service import CatalogService
 from .application.ports import SystemClock, UuidIdGenerator
 from .interfaces.http_api import create_server
@@ -25,13 +26,16 @@ def default_data_dir() -> Path:
     return Path.home() / ".local" / "state" / "service_09252_008"
 
 
-def build_services(data_dir: Path) -> tuple[CatalogService, BookingService, SQLiteStore]:
+def build_services(
+    data_dir: Path,
+) -> tuple[CatalogService, BookingService, CapacityForecastService, SQLiteStore]:
     store = SQLiteStore(data_dir / "booking.db")
     clock = SystemClock()
     ids = UuidIdGenerator()
     catalog = CatalogService(store, clock, ids)
     bookings = BookingService(store, clock, ids)
-    return catalog, bookings, store
+    forecast = CapacityForecastService(store, clock, ids)
+    return catalog, bookings, forecast, store
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,11 +46,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     data_dir = args.data_dir or default_data_dir()
-    catalog, bookings, store = build_services(data_dir)
+    catalog, bookings, forecast, store = build_services(data_dir)
     recovered = bookings.recover()  # 重启后恢复超时任务
     if recovered["expired_locks"] or recovered["expired_quotes"]:
         print(f"recovered timeouts: {recovered}")
-    server = create_server(args.host, args.port, catalog, bookings)
+    server = create_server(args.host, args.port, catalog, bookings, forecast)
     print(f"serving on http://{args.host}:{args.port} (data dir: {data_dir})")
     try:
         server.serve_forever()
