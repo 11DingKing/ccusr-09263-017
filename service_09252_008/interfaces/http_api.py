@@ -19,6 +19,7 @@ from ..application.catalog_service import (
     COLLECTION_WINDOWS,
     CatalogService,
 )
+from ..application.forecast_service import ForecastService
 from ..domain.errors import (
     BusinessRuleError,
     ConflictError,
@@ -61,7 +62,7 @@ class _Router:
         return None
 
 
-def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
+def build_router(catalog: CatalogService, bookings: BookingService, forecasts: ForecastService) -> _Router:
     router = _Router()
 
     def with_idempotency_key(payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -138,6 +139,26 @@ def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
         lambda body, hdr: bookings.cancel(hdr["__path__"]["booking_id"], with_idempotency_key(body, hdr)),
     )
     router.add("POST", "/admin/recover", lambda body, hdr: bookings.recover())
+
+    # 容量需求预测：保存输入口径（窗口+参数），重算必须指向明确输入版本
+    router.add("POST", "/capacity-forecasts", lambda body, hdr: forecasts.configure(body))
+    router.add("GET", "/capacity-forecasts", lambda body, hdr: {"items": forecasts.list_inputs()})
+    router.add(
+        "GET",
+        "/capacity-forecasts/{version_id}",
+        lambda body, hdr: forecasts.get_input(hdr["__path__"]["version_id"]),
+    )
+    router.add(
+        "POST",
+        "/capacity-forecasts/{version_id}/recompute",
+        lambda body, hdr: forecasts.recompute(hdr["__path__"]["version_id"]),
+    )
+    router.add(
+        "GET",
+        "/capacity-forecasts/{version_id}/report",
+        lambda body, hdr: forecasts.get_report(hdr["__path__"]["version_id"]),
+    )
+
     router.add("GET", "/health", lambda body, hdr: {"status": "ok"})
     return router
 
@@ -200,9 +221,10 @@ def create_server(
     port: int,
     catalog: CatalogService,
     bookings: BookingService,
+    forecasts: ForecastService,
 ) -> ThreadingHTTPServer:
     """构建线程化 HTTP 服务（守护线程，随进程退出）。"""
-    router = build_router(catalog, bookings)
+    router = build_router(catalog, bookings, forecasts)
     server = ThreadingHTTPServer((host, port), make_handler_class(router))
     server.daemon_threads = True
     return server
